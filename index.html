@@ -1,0 +1,773 @@
+
+<html>
+	<head>
+		<title>Tom Bonner</title>
+		<meta http-equiv="content-type" content="text/html; charset=ISO-8859-1">
+
+		<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+		
+		<style type='text/css'>
+			#div_id 
+			{
+				position:relative;
+				width:100%;
+				height:70%;
+				margin-left:auto;
+				margin-right:auto;
+				background-color:White;
+			}
+			canvas
+			{
+				outline: none;
+			}
+		</style>
+		<script type="text/javascript" src="glMatrix-0.9.5.min.js"></script>
+		<script type="text/javascript" src="webgl-utils.js"></script>
+
+		<script id="shader-fs" type="x-shader/x-fragment">
+			precision mediump float;
+
+			varying vec4 vColor;
+			varying vec3 vLightWeighting;
+			
+			void main(void)
+			{
+				gl_FragColor = vec4(vColor.rgb * vLightWeighting, 1.0);
+			}
+		</script>
+
+		<script id="shader-vs" type="x-shader/x-vertex">
+
+			attribute vec3 aVertexPosition;
+			attribute vec3 aVertexNormal;
+			
+			uniform mat4 uMVMatrix;
+			uniform mat4 uPMatrix;
+			uniform mat3 uNMatrix;
+			
+			uniform vec3 uLightingDirection;
+			uniform vec3 uDirectionalColor;
+			uniform vec3 uAmbientColor;
+			
+			varying vec3 vLightWeighting;
+			
+			varying vec4 vColor;
+
+			void main(void) {
+				gl_Position = uPMatrix * uMVMatrix * vec4(aVertexPosition, 1.0);
+				
+				vLightWeighting = vec3(1.0, 1.0, 1.0);
+				vec3 transformedNormal = uNMatrix * normalize(aVertexNormal);
+				float directionalLightWeighting = max(dot(transformedNormal, uLightingDirection), 0.0);
+				vLightWeighting = uAmbientColor + uDirectionalColor * directionalLightWeighting;
+				vLightWeighting;
+				vColor = vec4(1, 1, 1, 1);
+			}
+		</script>
+
+
+		<script type="text/javascript">
+
+			var gl;
+			
+			var shaderProgram;
+			var mvMatrix = mat4.create();
+			var mvMatrixStack = [];
+			var pMatrix = mat4.create();
+			
+			//Buffers
+				var vertices;
+				var normals;
+			
+			//InitBuffers
+				var count = -1;
+				var normal_count = -1;
+				var normal;
+				var x1 = 0, y1 = 0, y2 = 0, z2 = 0, x3 = 0, y3 = 0, z3 = 0;
+				var myFirstRun = true;
+				var alternate_count = 0;
+			
+			//Update
+				var grid = new Array();
+				var rotation_center = 0;
+				var size = 125;//125;//250;
+				var size_minus_two = size - 2;
+				var size_minus_one = size - 1;
+				var increase = 100 / size;
+				var currentlyPressedKeys = {};
+			
+				var lastTime = 0;
+				var wave_time_left = 0;
+				var wave_firing = false;
+				var runOnce = 0;
+				var selected = 0;
+				var data = 0;
+				var _data = 0;
+				var key_pos = { x : 0, y : 0};
+				var key_accel_pos = { x : 0, y : 0};
+				var key_accel_neg = { x : 0, y : 0};
+				var rotate_accel_pos = 0;
+				var rotate_accel_neg = 0;
+				var update_timer = 0;
+				var update_max = 150;
+			
+			//Mouse
+				var mouse_pos = 0;
+				var mouseIsDown = false;
+				var dragOffset = {x:0,y:0};
+				var last_click = {x:0,y:0};
+				
+			//Image loading
+				var images = new Array();
+				var waiting = 0;
+				var total = 0;
+				var image_max = 8;
+			
+			function initGL(canvas)
+			{
+				try 
+				{
+					gl = canvas.getContext("experimental-webgl");
+					gl.viewportWidth = canvas.width;
+					gl.viewportHeight = canvas.height;
+				}
+				catch (e) 
+				{
+
+				}
+				if (!gl)
+				{
+					alert("Could not initialise WebGL, sorry :-(");
+				}
+				
+				
+				canvas.onmousedown = function(e){
+					last_click.x = e.x;
+					last_click.y = e.y;
+					console.debug(last_click);
+
+					mouseIsDown = true;
+				}
+				canvas.onmouseup = function(e)
+				{
+					mouseIsDown = false;
+					dragOffset = {x:0,y:0};
+				}
+
+				canvas.onmousemove = function(e){
+					if(!mouseIsDown)
+						return;
+					
+					dragOffset.x = (last_click.x - e.x) / 2;
+					dragOffset.y = (last_click.y - e.y) / 2;
+					return false;
+				}
+			}
+
+
+			function getShader(gl, id)
+			{
+				var shaderScript = document.getElementById(id);
+				if (!shaderScript) {
+					return null;
+				}
+
+				var str = "";
+				var k = shaderScript.firstChild;
+				while (k) {
+					if (k.nodeType == 3) {
+						str += k.textContent;
+					}
+					k = k.nextSibling;
+				}
+
+				var shader;
+				if (shaderScript.type == "x-shader/x-fragment") {
+					shader = gl.createShader(gl.FRAGMENT_SHADER);
+				} else if (shaderScript.type == "x-shader/x-vertex") {
+					shader = gl.createShader(gl.VERTEX_SHADER);
+				} else {
+					return null;
+				}
+
+				gl.shaderSource(shader, str);
+				gl.compileShader(shader);
+
+				if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+					alert(gl.getShaderInfoLog(shader));
+					return null;
+				}
+
+				return shader;
+			}
+			
+			function initShaders() {
+				var fragmentShader = getShader(gl, "shader-fs");
+				var vertexShader = getShader(gl, "shader-vs");
+
+				shaderProgram = gl.createProgram();
+				gl.attachShader(shaderProgram, vertexShader);
+				gl.attachShader(shaderProgram, fragmentShader);
+				gl.linkProgram(shaderProgram);
+
+				if (!gl.getProgramParameter(shaderProgram, gl.LINK_STATUS)) {
+					alert("Could not initialise shaders");
+				}
+
+				gl.useProgram(shaderProgram);
+
+				shaderProgram.vertexPositionAttribute = gl.getAttribLocation(shaderProgram, "aVertexPosition");
+				gl.enableVertexAttribArray(shaderProgram.vertexPositionAttribute);
+				
+				shaderProgram.vertexNormalAttribute = gl.getAttribLocation(shaderProgram, "aVertexNormal");
+				gl.enableVertexAttribArray(shaderProgram.vertexNormalAttribute);
+
+				shaderProgram.pMatrixUniform = gl.getUniformLocation(shaderProgram, "uPMatrix");
+				shaderProgram.mvMatrixUniform = gl.getUniformLocation(shaderProgram, "uMVMatrix");
+				shaderProgram.nMatrixUniform = gl.getUniformLocation(shaderProgram, "uNMatrix");
+				shaderProgram.ambientColorUniform = gl.getUniformLocation(shaderProgram, "uAmbientColor");
+				shaderProgram.lightingDirectionUniform = gl.getUniformLocation(shaderProgram, "uLightingDirection");
+				shaderProgram.directionalColorUniform = gl.getUniformLocation(shaderProgram, "uDirectionalColor");
+			}
+			
+			function mvPushMatrix()
+			{
+				var copy = mat4.create();
+				mat4.set(mvMatrix, copy);
+				mvMatrixStack.push(copy);
+			}
+
+			function mvPopMatrix()
+			{
+				if (mvMatrixStack.length == 0)
+				{
+					throw "Invalid popMatrix!";
+				}
+				mvMatrix = mvMatrixStack.pop();
+			}
+
+
+			function setMatrixUniforms() 
+			{
+				gl.uniformMatrix4fv(shaderProgram.pMatrixUniform, false, pMatrix);
+				gl.uniformMatrix4fv(shaderProgram.mvMatrixUniform, false, mvMatrix);
+				
+				var normalMatrix = mat3.create();
+				mat4.toInverseMat3(mvMatrix, normalMatrix);
+				mat3.transpose(normalMatrix);
+				gl.uniformMatrix3fv(shaderProgram.nMatrixUniform, false, normalMatrix);
+			}
+
+
+			function degToRad(degrees) 
+			{
+				return degrees * Math.PI / 180;
+			}
+
+
+			var gridVertexPositionBuffer = 0;
+			var pyramidVertexColorBuffer = 0;
+			var gridVertexNormalBuffer = 0;
+			
+			function crossproduct(a, b)
+			{
+				return { x : (a.y * b.z) - (a.z * b.y), y : (a.z * b.x) - (a.x * b.z), z : (a.x * b.y) - (a.y * b.x) };
+			}
+			
+			function vector_sub(ax, ay, az, bx, by, bz)
+			{
+				return { x : ax - bx, y : ay - by, z : az - bz };
+			}
+			
+			function vector(_x, _y, _z)
+			{
+				return { x : _x, y : _y, z : _z};
+			}
+			
+			function initDynamicBuffers()
+			{
+				if (gridVertexPositionBuffer == 0)
+				{
+					gridVertexPositionBuffer = gl.createBuffer();
+					gridVertexNormalBuffer = gl.createBuffer();
+					
+					vertices = new Float32Array((size_minus_one * size_minus_one) * 18);
+					normals = new Float32Array((size_minus_one * size_minus_one) * 18);
+				}
+				
+				count = -1;
+				normal_count = -1;
+				x1 = 0;
+				y1 = 0;
+				y2 = 0;
+				z2 = 0;
+				x3 = 0;
+				y3 = 0;
+				z3 = 0;
+			
+				if (myFirstRun)
+				{
+					myFirstRun = false;
+					var _x = 0;
+					for (var _y = 0; _y < size_minus_one; _x++)
+					{
+						//Top Right Tri
+						
+						x1 = (_x * increase) + increase;
+						y1 = grid[_x + 1][_y    ].value;
+						z1 = _y * increase;
+						//Bottom Left Tri
+						x2 = _x * increase;
+						y2 = grid[_x    ][_y + 1].value;
+						z2 = (_y  * increase) + increase;
+						//Bottom Right Tri
+						x3 = (_x * increase) + increase;
+						y3 = grid[_x + 1][_y + 1].value;
+						z3 = (_y * increase) + increase;
+						
+						//Sets up two tris in the buffer
+						vertices[++count] = x2;  vertices[++count] = grid[_x][_y].value;  vertices[++count] = z1;
+						vertices[++count] = x1; vertices[++count] = y1; vertices[++count] = z1;
+						vertices[++count] = x2; vertices[++count] = y2; vertices[++count] = z2;
+						
+						vertices[++count] = x1;  vertices[++count] = y1;  vertices[++count] = z1;
+						vertices[++count] = x2; vertices[++count] = y2; vertices[++count] = z2;
+						vertices[++count] = x3; vertices[++count] = y3; vertices[++count] = z3;
+						
+						var a = { x : 0, y : y2 - grid[_x][_y].value, z: z2 - z1 };
+						var b = { x : x1 - x2, y : y1 - grid[_x][_y].value, z : 0 }; 
+						normal = { x : (a.y * b.z) - (a.z * b.y), y : (a.z * b.x) - (a.x * b.z), z : (a.x * b.y) - (a.y * b.x) }; //Cross product
+						
+						normals[++normal_count] = normal.x;
+						normals[++normal_count] = normal.y;
+						normals[++normal_count] = normal.z;
+						normals[++normal_count] = normal.x;
+						normals[++normal_count] = normal.y;
+						normals[++normal_count] = normal.z;
+						normals[++normal_count] = normal.x;
+						normals[++normal_count] = normal.y;
+						normals[++normal_count] = normal.z;
+						
+						a = { x :x2 - x1, y : y2 - y1, z: z2 - z1 };
+						b = { x : x3 - x1, y : y3 - y1, z : z3 - z1 };
+						normal = { x : (a.y * b.z) - (a.z * b.y), y : (a.z * b.x) - (a.x * b.z), z : (a.x * b.y) - (a.y * b.x) }; //Cross product
+						normals[++normal_count] = normal.x;
+						normals[++normal_count] = normal.y;
+						normals[++normal_count] = normal.z;
+						normals[++normal_count] = normal.x;
+						normals[++normal_count] = normal.y;
+						normals[++normal_count] = normal.z;
+						normals[++normal_count] = normal.x;
+						normals[++normal_count] = normal.y;
+						normals[++normal_count] = normal.z;
+						
+						if (_x == size_minus_two)
+						{
+							_x = 0;
+							_y++;
+						}
+					}
+				}
+				else
+				{
+					var _x = 0;
+					for (var _y = 0; _y < size_minus_one; _x++)
+					{
+						//Top Right Tri
+						
+						x1 = (_x * increase) + increase;
+						y1 = grid[_x + 1][_y    ].value;
+						z1 = _y * increase;
+						//Bottom Left Tri
+						x2 = _x * increase;
+						y2 = grid[_x    ][_y + 1].value;
+						z2 = (_y  * increase) + increase;
+						//Bottom Right Tri
+						x3 = (_x * increase) + increase;
+						y3 = grid[_x + 1][_y + 1].value;
+						z3 = (_y * increase) + increase;
+						
+						//Sets up two tris in the buffer
+						count += 2; vertices[count] = grid[_x][_y].value;  count += 3;
+						vertices[count] = y1; count += 3;
+						vertices[count] = y2; count += 3;
+						
+						vertices[count] = y1; count += 3;
+						vertices[count] = y2; count += 3;
+						vertices[count] = y3; count++;
+						vertices[1] = 1;
+						
+						var a = { x : 0, y : y2 - grid[_x][_y].value, z: z2 - z1 };
+						var b = { x : x1 - x2, y : y1 - grid[_x][_y].value, z : 0 }; 
+						normal = { x : (a.y * b.z) - (a.z * b.y), y : (a.z * b.x) - (a.x * b.z), z : (a.x * b.y) - (a.y * b.x) }; //Cross product
+						
+						normals[++normal_count] = normal.x;
+						normals[++normal_count] = normal.y;
+						normals[++normal_count] = normal.z;
+						normals[++normal_count] = normal.x;
+						normals[++normal_count] = normal.y;
+						normals[++normal_count] = normal.z;
+						normals[++normal_count] = normal.x;
+						normals[++normal_count] = normal.y;
+						normals[++normal_count] = normal.z;
+						
+						a = { x :x2 - x1, y : y2 - y1, z: z2 - z1 };
+						b = { x : x3 - x1, y : y3 - y1, z : z3 - z1 };
+						normal = { x : (a.y * b.z) - (a.z * b.y), y : (a.z * b.x) - (a.x * b.z), z : (a.x * b.y) - (a.y * b.x) }; //Cross product
+						normals[++normal_count] = normal.x;
+						normals[++normal_count] = normal.y;
+						normals[++normal_count] = normal.z;
+						normals[++normal_count] = normal.x;
+						normals[++normal_count] = normal.y;
+						normals[++normal_count] = normal.z;
+						normals[++normal_count] = normal.x;
+						normals[++normal_count] = normal.y;
+						normals[++normal_count] = normal.z;
+						
+						if (_x == size_minus_two)
+						{
+							_x = 0;
+							_y++;
+						}
+					}
+				}
+				gl.bindBuffer(gl.ARRAY_BUFFER, gridVertexPositionBuffer);
+				gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.DYNAMIC_DRAW);
+				gridVertexPositionBuffer.itemSize = 3;
+				gridVertexPositionBuffer.numItems = ((size_minus_one * size_minus_one) * 18) / 3;
+				
+				gl.bindBuffer(gl.ARRAY_BUFFER, gridVertexNormalBuffer);
+				gl.bufferData(gl.ARRAY_BUFFER, normals, gl.DYNAMIC_DRAW);
+				gridVertexNormalBuffer.itemSize = 3;
+				gridVertexNormalBuffer.numItems = ((size_minus_one * size_minus_one) * 18) / 3;
+			}
+			
+			function initFullBuffer()
+			{
+				initDynamicBuffers();
+			}
+			
+			function drawScene() {
+				gl.viewport(0, 0, gl.viewportWidth, gl.viewportHeight);
+				gl.clearColor(0.0, 0.0, 0.0, 0.0);
+				gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+				mat4.perspective(45, gl.viewportWidth / gl.viewportHeight, 0.1, 200.0, pMatrix);
+				
+				gl.bindBuffer(gl.ARRAY_BUFFER, gridVertexPositionBuffer);
+				gl.vertexAttribPointer(shaderProgram.vertexPositionAttribute, gridVertexPositionBuffer.itemSize, gl.FLOAT, false, 0, 0);
+				
+				gl.bindBuffer(gl.ARRAY_BUFFER, gridVertexNormalBuffer);
+				gl.vertexAttribPointer(shaderProgram.vertexNormalAttribute, gridVertexNormalBuffer.itemSize, gl.FLOAT, false, 0, 0);
+
+				gl.uniform1i(shaderProgram.useLightingUniform, true);
+			
+				gl.uniform3f(shaderProgram.ambientColorUniform, 0.2, 0.2, 0.2);
+				var lightingDirection = [0.2,-1,0.0];
+				
+				var adjustedLD = vec3.create();
+				vec3.normalize(lightingDirection, adjustedLD);
+				vec3.scale(adjustedLD, -1);
+				gl.uniform3fv(shaderProgram.lightingDirectionUniform, adjustedLD);
+				gl.uniform3f(shaderProgram.directionalColorUniform, 0.8, 0.8, 0.8);
+				
+				mat4.identity(mvMatrix);
+				mat4.rotate(mvMatrix, degToRad(0), [0, 1, 0]);
+				mat4.rotate(mvMatrix, degToRad(47), [1, 0, 0]);
+				mat4.translate(mvMatrix, [-50, -85, -150]);
+				
+				mat4.translate(mvMatrix, [50, -0, 50]);
+				mat4.rotate(mvMatrix, degToRad(rotation_center), [0, 1, 0]);
+				mat4.translate(mvMatrix, [-50, -0, -50]);
+				
+				mvPushMatrix();
+				
+				setMatrixUniforms();
+				gl.drawArrays(gl.TRIANGLES, 0, gridVertexPositionBuffer.numItems);
+			}
+			
+			function fireWave() {
+				runOnce = 1;
+
+				if (++selected > total)
+					selected = 1;
+
+				_data = GetImageDataSmall(getImage(".\\images\\" + selected + ".jpg"));
+				data = _data.data;
+
+				wave = {x : 0, y : 0};
+				wave_firing = true;
+				wave_time_left = 5;
+			}
+			function animate() 
+			{
+				var timeNow = new Date().getTime();
+				if (lastTime != 0) 
+				{
+					var elapsed = timeNow - lastTime;
+
+					if ((update_timer =- elapsed) < 0)
+					{
+						update_timer = update_max;
+						var grid_i;
+						for (var ii = size - 1; ii >= 0; ii--)
+						{
+							for (var i = size - 1; i >= 0; i--)
+							{
+								grid_i = grid[ii][i];
+								if (grid_i.accel != 0)
+								{
+									grid_i.value += grid_i.accel;
+									grid_i.accel -= 0.008;
+									
+									if (grid_i.accel < 0) //Falling
+									{
+										if (grid_i.value <= grid_i.set) //Bounce
+										{
+											grid_i.accel = grid_i.accel / -1.8;
+											if (grid_i.accel <= 0.01) //Tiny bounce causes end
+											{
+												grid_i.accel = 0;
+												grid_i.value = grid_i.set;
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+				
+				var moved = false;
+				if (currentlyPressedKeys[32])
+				{
+					if (runOnce == 0)
+					{
+						this.fireWave();
+					}
+				}
+				if (currentlyPressedKeys[37])
+				{
+					rotate_accel_pos += 1.0;
+				}
+				if (currentlyPressedKeys[39])
+				{
+					rotate_accel_neg += 1.0;
+				}
+				
+				if (dragOffset.x > 0)
+					rotate_accel_pos += dragOffset.x * 0.01;
+				else 
+					rotate_accel_neg -= dragOffset.x * 0.01; 
+				
+				rotation_center -= rotate_accel_pos - rotate_accel_neg;
+				var rotate_max = 5;
+				var slow_down = 0.10;			
+					
+				if (rotate_accel_pos > rotate_max)
+					rotate_accel_pos = rotate_max;
+				if (rotate_accel_neg > rotate_max)
+					rotate_accel_neg = rotate_max;
+					
+				if (rotate_accel_pos > 0)
+					rotate_accel_pos -= slow_down;
+				if (rotate_accel_neg > 0)
+					rotate_accel_neg -= slow_down;
+				if (rotate_accel_pos < 0)
+					rotate_accel_pos = 0;
+				if (rotate_accel_neg < 0)
+					rotate_accel_neg = 0;
+					
+				if (rotate_accel_pos == 0)
+					rotate_accel_pos = 0.1;
+				
+				if (wave_firing && (wave_time_left-=elapsed) < 0)
+				{
+					for(var y = size - 1; y >= 0 ; y--)
+					{
+						var _x = wave.x;
+						
+						var scale = 250.0 / size;
+						grid[_x][y].set = ((255 - data[((_data.width * (y * scale)) + (wave.x * scale)) * 4]) / 255) * 2;
+						grid[_x][y].accel = Math.random() * 0.2;
+						grid[_x][y].goPass = false;
+					}
+					if (++wave.x == size)
+					{
+						wave_firing = false;
+					}
+					wave_time_left = 5;
+				}
+				
+				initDynamicBuffers();
+				lastTime = timeNow;
+			}
+
+			function tick()
+			{
+				drawScene();
+				animate();
+				requestAnimFrame(tick);
+			}
+			
+			function GetImageDataSmall(_image)
+			{
+				return GetImageData(0,0,_image.width, _image.height, _image);
+			}
+			
+			function GetImageData(_x, _y, _width, _height, _image)
+			{
+				var temp = document.createElement('canvas');
+				temp.width = _image.width;
+				temp.height = _image.height;
+				temp.getContext('2d').drawImage(_image, 0,0);
+				var imageData = temp.getContext('2d').getImageData(_x, _y, _width, _height);
+				return imageData;
+			}
+			
+			function handleKeyDown(event)
+			{
+				currentlyPressedKeys[event.keyCode] = true;
+			}
+
+			function handleKeyUp(event)
+			{
+				currentlyPressedKeys[event.keyCode] = false;
+				if (event.keyCode == 32)
+				{
+					runOnce = 0;
+				}
+			}
+			
+			function loadImage(_name)
+			{
+				var img = new Image();
+							
+				total++;
+				img.onload = postLoadedImages;
+				
+				img.onerror = function()
+				{
+					console.debug("Image loading Error");
+				}
+				images[images.length] = { 	
+											image : img,
+											name : _name
+										};
+				images[images.length-1].image.src = _name;
+			}
+			function loadImages()
+			{
+				for (var i=1;i<image_max;i++)
+				{
+					loadImage(".\\images\\" + i + ".jpg");
+				}
+			}
+			
+			function loadWebGL()
+			{
+				var canvas = document.getElementById("canv");
+				canvas.focus();
+				var div = document.getElementById("div_id");
+
+				div.addEventListener('click', () => { fireWave() }, false);
+
+				canvas.width = div.scrollWidth;// / 1.5;
+				canvas.height = div.scrollHeight;// / 1.5;
+				
+				key_pos.x = size / 2;
+				key_pos.y = size / 2;
+				
+				initGL(canvas);
+				initShaders()
+				
+				for (var ii=0;ii<size;ii++)
+				{
+					grid[ii] = new Array();
+					for (var i=0;i<size;i++)
+					{
+						grid[ii][i] = 	{
+											value : Math.random() * 3,
+											set :  0,
+											accel : 0
+										};
+					}
+				}
+				
+				initFullBuffer();
+				
+				gl.clearColor(0.0, 0.0, 0.0, 1.0);
+
+				document.onkeydown = handleKeyDown;
+				document.onkeyup = handleKeyUp;
+				document.onmousedown = mouseDown;
+				document.onmouseup = mouseUp;
+				document.onmousemove = mouseMove;
+				
+				tick();
+			}
+			
+			function mouseMove(event)
+			{
+				mouse_pos.x = window.event.clientX;
+				mouse_pos.y = window.event.clientY;
+			}
+			
+			var mouse_been_down = false;
+			function mouseDown(event)
+			{
+				mouse_been_down = true;
+			}
+			
+			function mouseUp(event)
+			{
+				if (mouse_been_down)
+				{
+					mouse_been_down = false;
+				}
+			}
+			
+			function getImage(_name)
+			{
+				for (var i=0;i<images.length;i++)
+				{
+					if (images[i].name == _name)
+					{
+						return images[i].image;
+					}
+				}
+				console.debug(_name + " not found");
+				return 0;
+			}
+			
+			function postLoadedImages()
+			{
+				waiting++;
+				if (total == waiting)
+				{
+					loadWebGL();
+				}
+			}
+			
+			function webGLStart()
+			{
+				loadImages();
+			}
+
+		</script>
+
+
+	</head>
+
+	<body onload="webGLStart();">
+		<div id = "div_id">
+			<center>
+				<canvas id = "canv" tabindex="0">
+					Sorry, you need Chrome to see this, <a href="www.google.com/intl/en/chrome/browser/">avaliable here</a>
+				</canvas>
+			</center>
+		</div>	
+		
+	</body>
+
+</html>
